@@ -46,6 +46,13 @@ class Esp32BleKeyboard : public PollingComponent {
   BLEServer *pServer;
   BleKeyboard bleKeyboard;
 
+  void update_timer();
+  void send_keyboard_report(uint8_t modifiers, uint8_t key1 = 0, uint8_t key2 = 0, uint8_t key3 = 0,
+                            uint8_t key4 = 0, uint8_t key5 = 0, uint8_t key6 = 0);
+  void send_media_report(uint8_t byte0, uint8_t byte1);
+  void process_next_print_char();
+
+  bool stack_running_{true};  // <-- НОВОЕ: отслеживаем, поднят ли BLE-стек целиком
   bool reconnect_{true};
   uint32_t default_delay_{100};
   uint32_t release_delay_{8};
