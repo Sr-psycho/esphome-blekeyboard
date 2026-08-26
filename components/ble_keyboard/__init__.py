@@ -81,8 +81,8 @@ async def to_code(config: dict) -> None:
     if not CORE.is_esp32:
         raise cv.Invalid("The component only supports ESP32.")
 
-    if not CORE.using_arduino:
-        raise cv.Invalid("The component only supports the Arduino framework.")
+    if not CORE.using_esp_idf:
+        raise cv.Invalid("The component only supports the ESP-IDF framework.")
 
     var = cg.new_Pvariable(
         config[CONF_ID],
@@ -100,7 +100,8 @@ async def to_code(config: dict) -> None:
     if config[CONF_BUTTONS]:
         await adding_buttons(var)
 
-    adding_dependencies(config[CONF_USE_DEFAULT_LIBS])
+    if CORE.using_arduino:
+        adding_dependencies(config[CONF_USE_DEFAULT_LIBS])
 
 
 async def adding_buttons(var: MockObj) -> None:
