@@ -772,6 +772,75 @@ esp_err_t esp_hid_ble_gap_adv_start(void)
 }
 #endif /* CONFIG_BT_BLE_ENABLED */
 
+#if CONFIG_BT_NIMBLE_ENABLED
+/*
+ * BLE GAP (NimBLE peripheral/advertising) — the Bluedroid functions above
+ * are compiled only under CONFIG_BT_BLE_ENABLED; this is the NimBLE
+ * equivalent used when CONFIG_BT_NIMBLE_ENABLED is set instead.
+ */
+
+esp_err_t esp_hid_ble_gap_adv_init(uint16_t appearance, const char *device_name)
+{
+    struct ble_hs_adv_fields fields;
+    static ble_uuid16_t uuids16[] = {
+        BLE_UUID16_INIT(BLE_HID_SVC_UUID)
+    };
+    int rc;
+
+    memset(&fields, 0, sizeof(fields));
+
+    fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
+
+    fields.tx_pwr_lvl_is_present = 1;
+    fields.tx_pwr_lvl = BLE_HS_ADV_TX_PWR_LVL_AUTO;
+
+    fields.appearance = appearance;
+    fields.appearance_is_present = 1;
+
+    fields.name = (uint8_t *)device_name;
+    fields.name_len = strlen(device_name);
+    fields.name_is_complete = 1;
+
+    fields.uuids16 = uuids16;
+    fields.num_uuids16 = 1;
+    fields.uuids16_is_complete = 1;
+
+    rc = ble_gap_adv_set_fields(&fields);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "error setting advertisement data; rc=%d", rc);
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t esp_hid_ble_gap_adv_start(void)
+{
+    uint8_t own_addr_type;
+    struct ble_gap_adv_params adv_params;
+    int rc;
+
+    rc = ble_hs_id_infer_auto(0, &own_addr_type);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "error determining address type; rc=%d", rc);
+        return ESP_FAIL;
+    }
+
+    memset(&adv_params, 0, sizeof(adv_params));
+    adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
+    adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
+
+    rc = ble_gap_adv_start(own_addr_type, NULL, BLE_HS_FOREVER, &adv_params,
+                           nimble_hid_gap_event, NULL);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "error enabling advertisement; rc=%d", rc);
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
+}
+#endif /* CONFIG_BT_NIMBLE_ENABLED */
+
 /*
  * CONTROLLER INIT
  * */
