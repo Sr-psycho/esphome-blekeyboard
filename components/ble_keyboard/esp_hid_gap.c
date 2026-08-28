@@ -25,7 +25,8 @@
 #include "host/ble_hs_adv.h"
 #include "nimble/ble.h"
 #include "host/ble_sm.h"
-#define BLE_HID_SVC_UUID 0x1812          /* HID Service*/
+#define BLE_HID_SVC_UUID 0x1812 /* HID Service*/
+static int nimble_hid_gap_event(struct ble_gap_event *event, void *arg);
 #else
 #include "esp_bt_device.h"
 #endif
