@@ -25,7 +25,7 @@
 #include "host/ble_hs_adv.h"
 #include "nimble/ble.h"
 #include "host/ble_sm.h"
-#define BLE_HID_SVC_UUID 0x1812 /* HID Service*/
+#define BLE_HID_SVC_UUID 0x1812          /* HID Service*/
 static int nimble_hid_gap_event(struct ble_gap_event *event, void *arg);
 #else
 #include "esp_bt_device.h"
@@ -778,14 +778,34 @@ esp_err_t esp_hid_ble_gap_adv_start(void)
  * BLE GAP (NimBLE peripheral/advertising) — the Bluedroid functions above
  * are compiled only under CONFIG_BT_BLE_ENABLED; this is the NimBLE
  * equivalent used when CONFIG_BT_NIMBLE_ENABLED is set instead.
+ *
+ * Important: ble_gap_adv_set_fields()/ble_gap_adv_start() can only succeed
+ * AFTER the NimBLE host has synced (otherwise they return BLE_HS_EDISABLED,
+ * rc=30). esp_hid_ble_gap_adv_init() is called from setup() BEFORE the host
+ * task is even started, so it must not touch the NimBLE API directly — it
+ * only remembers the parameters. The real ble_gap_adv_set_fields() call is
+ * deferred into esp_hid_ble_gap_adv_start(), which the caller only invokes
+ * after ESP_HIDD_START_EVENT (i.e. after host sync).
  */
+static uint16_t s_adv_appearance = 0;
+static char s_adv_device_name[32] = "BLE Keyboard";
 
 esp_err_t esp_hid_ble_gap_adv_init(uint16_t appearance, const char *device_name)
+{
+    s_adv_appearance = appearance;
+    strncpy(s_adv_device_name, device_name, sizeof(s_adv_device_name) - 1);
+    s_adv_device_name[sizeof(s_adv_device_name) - 1] = '\0';
+    return ESP_OK;
+}
+
+esp_err_t esp_hid_ble_gap_adv_start(void)
 {
     struct ble_hs_adv_fields fields;
     static ble_uuid16_t uuids16[] = {
         BLE_UUID16_INIT(BLE_HID_SVC_UUID)
     };
+    uint8_t own_addr_type;
+    struct ble_gap_adv_params adv_params;
     int rc;
 
     memset(&fields, 0, sizeof(fields));
@@ -795,11 +815,11 @@ esp_err_t esp_hid_ble_gap_adv_init(uint16_t appearance, const char *device_name)
     fields.tx_pwr_lvl_is_present = 1;
     fields.tx_pwr_lvl = BLE_HS_ADV_TX_PWR_LVL_AUTO;
 
-    fields.appearance = appearance;
+    fields.appearance = s_adv_appearance;
     fields.appearance_is_present = 1;
 
-    fields.name = (uint8_t *)device_name;
-    fields.name_len = strlen(device_name);
+    fields.name = (uint8_t *)s_adv_device_name;
+    fields.name_len = strlen(s_adv_device_name);
     fields.name_is_complete = 1;
 
     fields.uuids16 = uuids16;
@@ -811,15 +831,6 @@ esp_err_t esp_hid_ble_gap_adv_init(uint16_t appearance, const char *device_name)
         ESP_LOGE(TAG, "error setting advertisement data; rc=%d", rc);
         return ESP_FAIL;
     }
-
-    return ESP_OK;
-}
-
-esp_err_t esp_hid_ble_gap_adv_start(void)
-{
-    uint8_t own_addr_type;
-    struct ble_gap_adv_params adv_params;
-    int rc;
 
     rc = ble_hs_id_infer_auto(0, &own_addr_type);
     if (rc != 0) {
