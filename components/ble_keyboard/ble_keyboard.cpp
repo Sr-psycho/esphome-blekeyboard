@@ -12,20 +12,13 @@
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
-#include "host/ble_store.h"      // ble_store_config_init
-#include "services/gap/ble_svc_gap.h"  // ble_svc_gap_device_name_set (declared via host tree)
-#include "esp_nimble_mem.h"      // nimble_platform_mem_* when BLE_STATIC_TO_DYNAMIC is on
-#include "esp_bt.h"              // esp_bt_controller_disable/deinit
+#include "host/ble_store.h"
+#include "services/gap/ble_svc_gap.h"
+#include "esp_nimble_mem.h"
+#include "esp_bt.h"
 
-/* esp_hid device library: provides esp_hidd_dev_init, esp_hidd_dev_input_set,
- * esp_hidd_dev_battery_set, etc. The NimBLE backend of esp_hid is wired by
- * the `nimble_hidd.c` source that lives inside the esp_hid component. */
 #include "esp_hid_common.h"
 #include "esp_hidd.h"
-
-/* esp_hid_gap_init / esp_hid_ble_gap_adv_init / _start live in the example
- * directory of ESP-IDF, not in the esp_hid component itself. We vendor the
- * NimBLE-only branch of that file in this component as esp_hid_gap.c. */
 #include "esp_hid_gap.h"
 
 namespace esphome {
@@ -33,8 +26,7 @@ namespace ble_keyboard {
 
 static const char *const TAG = "ble_keyboard";
 
-/* --- HID Report Map (verbatim from the previous hand-rolled implementation).
- * Report ID 1 = keyboard, Report ID 2 = consumer control. --- */
+/* --- HID Report Map --- */
 static const uint8_t kHidReportMap[] = {
     // Keyboard (Report ID 1)
     0x05, 0x01, 0x09, 0x06, 0xA1, 0x01,
@@ -66,42 +58,52 @@ static uint8_t keyboard_output_report_[1] = {0};
 static char g_device_name[32] = "BLE Keyboard";
 static char g_manufacturer_id[32] = "ESPHome";
 
-/* --- НОВОЕ: состояние полного вкл/выкл BLE-стека (start()/stop()) --- */
+/* Full stack lifecycle (start()/stop()) guard.
+ * RU: Мьютекс и флаг для отслеживания состояния всего BLE-стека
+ * (запущен/остановлен) в рамках ble_keyboard.start()/stop(). */
 static std::mutex s_lifecycle_mtx;
-static std::atomic<bool> s_stack_running{true};
+static std::atomic<bool> s_stack_running{false};
 
-/* Handle to the esp_hid device. Populated by esp_hidd_dev_init. */
+/* CRITICAL RACE-CONDITION GUARD.
+ * EN: Set to true at the very start of stop(), BEFORE any teardown of the
+ * NimBLE stack begins. The HID disconnect handler checks this flag before
+ * deciding to auto-restart advertising. Without it, a disconnect event that
+ * fires concurrently with (or immediately before) an intentional stop() can
+ * race with nimble_port_stop()/nimble_port_deinit(): the reconnect logic
+ * tries to touch a host that is mid-teardown, producing a LoadProhibited
+ * Guru Meditation crash (observed at PC 0x400828ca / EXCVADDR 0x1a in field
+ * logs). Setting the flag first closes that window.
+ *
+ * RU: Устанавливается в true в самом начале stop(), ДО начала разрушения
+ * NimBLE-стека. Обработчик HID-дисконнекта проверяет этот флаг перед тем,
+ * как решить, перезапускать ли адвертайзинг автоматически. Без этого флага
+ * событие дисконнекта, которое срабатывает одновременно с (или чуть раньше)
+ * намеренным stop(), может столкнуться в гонке с nimble_port_stop()/
+ * nimble_port_deinit(): логика реконнекта пытается обратиться к хосту,
+ * который в этот момент разрушается — и получаем крэш LoadProhibited
+ * (наблюдался по адресу PC 0x400828ca / EXCVADDR 0x1a в полевых логах).
+ * Установка флага первым делом закрывает это окно гонки. */
+static std::atomic<bool> s_intentional_stop{false};
+
 static esp_hidd_dev_t *s_hid_dev = NULL;
-
-/* Startup delay counter. Set by ESP_HIDD_START_EVENT; decremented in
- * update(). Advertising starts after 2s to let the controller finish
- * WiFi scan and free the HCI for BLE advertising. */
 static int s_advertising_startup_delay = 0;
 
-/* `ble_store_config_init` lives in NimBLE's store/config source. The header
- * tree does not export it, so we forward-declare it here, mirroring the
- * approach used by the official esp_hid_device example. */
 extern "C" void ble_store_config_init(void);
 
-/* --- Host task --- */
 extern "C" void nimble_host_task(void *param) {
   ESP_LOGI(TAG, "NimBLE host task started");
   nimble_port_run();
   nimble_port_freertos_deinit();
 }
 
-/* --- HID device event handler --- */
 static void hidd_event_handler(void *handler_args, esp_event_base_t base, int32_t id, void *event_data) {
   esp_hidd_event_t event = (esp_hidd_event_t) id;
   esp_hidd_event_data_t *param = (esp_hidd_event_data_t *) event_data;
 
   switch (event) {
     case ESP_HIDD_START_EVENT:
-      // Defer advertising start by 2s so the controller finishes WiFi scan
-      // and the HCI is free for BLE advertising.  PollingComponent::update()
-      // counts down and fires esp_hid_ble_gap_adv_start().
       ESP_LOGI(TAG, "HID device stack started; advertising will begin in 2s");
-      s_advertising_startup_delay = 2;  // 2 x update_interval (1000ms)
+      s_advertising_startup_delay = 2;
       break;
     case ESP_HIDD_CONNECT_EVENT:
       g_connected = true;
@@ -110,17 +112,16 @@ static void hidd_event_handler(void *handler_args, esp_event_base_t base, int32_
     case ESP_HIDD_DISCONNECT_EVENT:
       g_connected = false;
       ESP_LOGI(TAG, "HID device disconnected; reason=%d", param->disconnect.reason);
-      // Не переподключаем автоматически, если пользователь явно вызвал stop()
-      // (в этом случае s_stack_running уже false к моменту сюда добраться
-      // не может, так как стек снесён целиком — но проверка не помешает).
-      if (g_reconnect && s_stack_running.load()) {
-        // Re-start advertising so a fresh connection can be made without a power cycle.
-        // The host is by now fully up, so this call is safe.
+      /* EN: Do NOT auto-restart advertising if stop() has already begun
+       * (s_intentional_stop) — see the comment on that flag above.
+       * RU: НЕ перезапускаем адвертайзинг автоматически, если stop() уже
+       * начал выполняться (флаг s_intentional_stop) — см. комментарий
+       * к этому флагу выше. */
+      if (g_reconnect && s_stack_running.load() && !s_intentional_stop.load()) {
         esp_hid_ble_gap_adv_start();
       }
       break;
     case ESP_HIDD_OUTPUT_EVENT:
-      // Host wrote the LED state to the Output Report (Caps/Num/Scroll Lock).
       if (param->output.length > 0 && param->output.data != nullptr) {
         memcpy(keyboard_output_report_, param->output.data,
                param->output.length < sizeof(keyboard_output_report_)
@@ -134,8 +135,6 @@ static void hidd_event_handler(void *handler_args, esp_event_base_t base, int32_
   }
 }
 
-/* --- class methods --- */
-
 void Esp32BleKeyboard::setup() {
   ESP_LOGI(TAG, "Setting up BLE Keyboard (esp_hid device API)");
 
@@ -144,23 +143,29 @@ void Esp32BleKeyboard::setup() {
   strncpy(g_manufacturer_id, manufacturer_id_.c_str(), sizeof(g_manufacturer_id) - 1);
   g_manufacturer_id[sizeof(g_manufacturer_id) - 1] = '\0';
 
-  // Step 1: initialize the NimBLE host (controller + nimble_port + controller enable).
   esp_err_t err = esp_hid_gap_init(ESP_HID_TRANSPORT_BLE);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "esp_hid_gap_init failed: %d", err);
     return;
   }
 
-  // Step 2: set the appearance (HID Keyboard) and the device name in the
-  // advertisement fields. This populates the static `fields` struct inside
-  // esp_hid_gap.c, which is later used by esp_hid_ble_gap_adv_start.
+  /* EN: esp_hid_ble_gap_adv_init() (NimBLE variant) only stores appearance
+   * and device name at this point — it must NOT call the NimBLE API yet,
+   * because the host has not synced. The real ble_gap_adv_set_fields() call
+   * happens later, inside esp_hid_ble_gap_adv_start(), triggered from
+   * update() after ESP_HIDD_START_EVENT + 2s delay.
+   * RU: esp_hid_ble_gap_adv_init() (NimBLE-версия) на этом шаге лишь
+   * запоминает appearance и имя устройства — НЕЛЬЗЯ обращаться к NimBLE API
+   * здесь, потому что хост ещё не синхронизирован. Реальный вызов
+   * ble_gap_adv_set_fields() происходит позже, внутри
+   * esp_hid_ble_gap_adv_start(), которая срабатывает из update() после
+   * ESP_HIDD_START_EVENT + задержки 2с. */
   err = esp_hid_ble_gap_adv_init(ESP_HID_APPEARANCE_KEYBOARD, g_device_name);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "esp_hid_ble_gap_adv_init failed: %d", err);
     return;
   }
 
-  // Override the security parameters that esp_hid_ble_gap_adv_init set.
   ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_NO_IO;
   ble_hs_cfg.sm_bonding = 1;
   ble_hs_cfg.sm_mitm = 0;
@@ -168,7 +173,6 @@ void Esp32BleKeyboard::setup() {
   ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
   ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
 
-  // Step 3: build the report maps and the device config.
   static esp_hid_raw_report_map_t report_maps[] = {
       { .data = kHidReportMap, .len = sizeof(kHidReportMap) },
   };
@@ -184,33 +188,27 @@ void Esp32BleKeyboard::setup() {
       .report_maps_len    = 1,
   };
 
-  // Step 4: register the HID device. After this, s_hid_dev is non-NULL and we
-  // can send input reports.
   err = esp_hidd_dev_init(&hid_config, ESP_HID_TRANSPORT_BLE, hidd_event_handler, &s_hid_dev);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "esp_hidd_dev_init failed: %d", err);
     return;
   }
 
-  // Set the GAP Device Name characteristic (0x2A00) AFTER esp_hidd_dev_init()
   ble_svc_gap_device_name_set(g_device_name);
-
-  // Step 5: initial battery level, until Home Assistant overrides it.
   esp_hidd_dev_battery_set(s_hid_dev, battery_level_);
 
   g_reconnect = reconnect_;
 
-  // Step 6: enable NimBLE's bond store backed by NVS.
   ble_store_config_init();
   ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
 
-  // Step 7: start the NimBLE host task.
   err = esp_nimble_enable(reinterpret_cast<void *>(nimble_host_task));
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "esp_nimble_enable failed: %d", err);
     return;
   }
   s_stack_running = true;
+  s_intentional_stop = false;
   ESP_LOGI(TAG, "NimBLE host task started; advertising will begin on host sync");
 }
 
@@ -240,9 +238,7 @@ void Esp32BleKeyboard::send_keyboard_report(uint8_t modifiers, uint8_t key1, uin
     return;
   }
   uint8_t buffer[8] = { modifiers, 0, key1, key2, key3, key4, key5, key6 };
-  esp_err_t err = esp_hidd_dev_input_set(s_hid_dev, /* map_index = */ 0,
-                                          /* report_id = */ 1,
-                                          buffer, sizeof(buffer));
+  esp_err_t err = esp_hidd_dev_input_set(s_hid_dev, 0, 1, buffer, sizeof(buffer));
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "esp_hidd_dev_input_set (keyboard) failed: %d", err);
   }
@@ -253,15 +249,12 @@ void Esp32BleKeyboard::send_media_report(uint8_t byte0, uint8_t byte1) {
     return;
   }
   uint8_t buffer[2] = { byte0, byte1 };
-  esp_err_t err = esp_hidd_dev_input_set(s_hid_dev, /* map_index = */ 0,
-                                          /* report_id = */ 2,
-                                          buffer, sizeof(buffer));
+  esp_err_t err = esp_hidd_dev_input_set(s_hid_dev, 0, 2, buffer, sizeof(buffer));
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "esp_hidd_dev_input_set (media) failed: %d", err);
   }
 }
 
-/* --- ASCII -> HID keycode lookup --- */
 struct HidKey {
   uint8_t modifier;
   uint8_t key;
@@ -445,7 +438,8 @@ void Esp32BleKeyboard::release() {
 }
 
 /* ========================================================================
- * ПОЛНЫЙ ВКЛ/ВЫКЛ BLE-СТЕКА (патч)
+ * FULL STACK START/STOP
+ * ПОЛНЫЙ ЗАПУСК/ОСТАНОВ BLE-СТЕКА
  * ======================================================================== */
 
 void Esp32BleKeyboard::start() {
@@ -456,6 +450,7 @@ void Esp32BleKeyboard::start() {
     return;
   }
   ESP_LOGI(TAG, "Re-initializing BLE stack (full start)");
+  s_intentional_stop = false;
 
   esp_err_t err = esp_hid_gap_init(ESP_HID_TRANSPORT_BLE);
   if (err != ESP_OK) {
@@ -524,21 +519,27 @@ void Esp32BleKeyboard::stop() {
     ESP_LOGW(TAG, "BLE stack already stopped, ignoring stop()");
     return;
   }
+
+  /* EN: MUST be the very first statement of the teardown — see the comment
+   * on s_intentional_stop's declaration above for why.
+   * RU: ДОЛЖНО быть самой первой инструкцией разрушения стека — почему,
+   * см. комментарий у объявления s_intentional_stop выше. */
+  s_intentional_stop = true;
+
   ESP_LOGI(TAG, "Tearing down BLE stack completely (forces disconnect)");
 
-  // Деинициализируем HID, пока host ещё жив — иначе GATT/store не освободятся.
   if (s_hid_dev != nullptr) {
     esp_hidd_dev_deinit(s_hid_dev);
     s_hid_dev = nullptr;
   }
 
-  // Останавливаем host task (синхронно).
   int rc = nimble_port_stop();
   if (rc != 0) {
     ESP_LOGE(TAG, "nimble_port_stop failed: %d — aborting teardown", rc);
+    s_intentional_stop = false;  // EN: roll back the flag, teardown failed / RU: откатываем флаг, снос не удался
     return;
   }
-  nimble_port_deinit();  // на ESP-IDF 5.x это также гасит контроллер
+  nimble_port_deinit();
 
 #if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 0, 0)
   esp_err_t cerr = esp_bt_controller_disable();
