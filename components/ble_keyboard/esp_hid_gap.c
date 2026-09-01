@@ -991,10 +991,15 @@ nimble_hid_gap_event(struct ble_gap_event *event, void *arg)
         ESP_LOGI(TAG, "connection %s; status=%d",
                 event->connect.status == 0 ? "established" : "failed",
                 event->connect.status);
+        s_hid_conn_handle = (event->connect.status == 0)
+                                 ? event->connect.conn_handle
+                                 : 0xffff; /* BLE_HS_CONN_HANDLE_NONE */
         return 0;
         break;
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGI(TAG, "disconnect; reason=%d", event->disconnect.reason);
+        s_hid_conn_handle = 0xffff; /* BLE_HS_CONN_HANDLE_NONE */
+        return 0;
 
         return 0;
     case BLE_GAP_EVENT_CONN_UPDATE:
