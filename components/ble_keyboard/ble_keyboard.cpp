@@ -2,6 +2,7 @@
 
 #include "ble_keyboard.h"
 #include "esphome/core/log.h"
+#include "esphome/core/application.h"
 #include <cctype>
 #include <cstdlib>
 #include <vector>
@@ -69,12 +70,14 @@ static esp_hidd_dev_t *s_hid_dev = NULL;
 static int s_advertising_startup_delay = 0;
 
 /* EN: Pointer to the single Esp32BleKeyboard instance, needed so free
- * functions (like the NimBLE event handler) can schedule timeouts via the
- * component's public set_timeout()/cancel_timeout() API and call the
- * public start()/stop() methods.
+ * functions (like the NimBLE event handler) can schedule timeouts via
+ * App.scheduler (the component's own protected set_timeout()/
+ * cancel_timeout() cannot be called from outside its member functions)
+ * and call the public start()/stop() methods.
  * RU: Указатель на единственный экземпляр Esp32BleKeyboard — нужен, чтобы
  * свободные функции (например, обработчик событий NimBLE) могли планировать
- * таймауты через публичные set_timeout()/cancel_timeout() и вызывать
+ * таймауты через App.scheduler (собственные protected set_timeout()/
+ * cancel_timeout() компонента нельзя вызвать вне его методов) и вызывать
  * публичные start()/stop(). */
 static Esp32BleKeyboard *s_instance = nullptr;
 
@@ -128,8 +131,8 @@ static void schedule_idle_disconnect() {
   if (s_instance == nullptr) {
     return;
   }
-  s_instance->cancel_timeout("ble_idle_disconnect");
-  s_instance->set_timeout("ble_idle_disconnect", kAutoIdleDisconnectMs, []() {
+  App.scheduler.cancel_timeout(s_instance, "ble_idle_disconnect");
+  App.scheduler.set_timeout(s_instance, "ble_idle_disconnect", kAutoIdleDisconnectMs, []() {
     ESP_LOGI(TAG, "Auto-disconnect: %u ms of inactivity elapsed", (unsigned) kAutoIdleDisconnectMs);
     if (s_instance != nullptr) {
       s_instance->stop();
@@ -167,8 +170,8 @@ static void queue_or_start(PendingReportKind kind, const uint8_t *buf, size_t le
   }
 
   if (s_instance != nullptr) {
-    s_instance->cancel_timeout("ble_pending_timeout");
-    s_instance->set_timeout("ble_pending_timeout", kPendingReportMaxWaitMs, []() {
+    App.scheduler.cancel_timeout(s_instance, "ble_pending_timeout");
+    App.scheduler.set_timeout(s_instance, "ble_pending_timeout", kPendingReportMaxWaitMs, []() {
       if (s_pending_kind != PendingReportKind::NONE) {
         ESP_LOGW(TAG, "Queued action timed out waiting for a connection (%u ms); discarding",
                  (unsigned) kPendingReportMaxWaitMs);
@@ -199,8 +202,8 @@ static void hidd_event_handler(void *handler_args, esp_event_base_t base, int32_
       g_connected = true;
       ESP_LOGI(TAG, "HID device connected");
       if (s_pending_kind != PendingReportKind::NONE && s_instance != nullptr) {
-        s_instance->cancel_timeout("ble_pending_timeout");
-        s_instance->set_timeout("ble_pending_flush", kPostConnectSettleMs, []() { flush_pending_report(); });
+        App.scheduler.cancel_timeout(s_instance, "ble_pending_timeout");
+        App.scheduler.set_timeout(s_instance, "ble_pending_flush", kPostConnectSettleMs, []() { flush_pending_report(); });
       } else {
         schedule_idle_disconnect();
       }
@@ -209,7 +212,7 @@ static void hidd_event_handler(void *handler_args, esp_event_base_t base, int32_
       g_connected = false;
       ESP_LOGI(TAG, "HID device disconnected; reason=%d", param->disconnect.reason);
       if (s_instance != nullptr) {
-        s_instance->cancel_timeout("ble_idle_disconnect");
+        App.scheduler.cancel_timeout(s_instance, "ble_idle_disconnect");
       }
       if (g_reconnect && s_stack_running.load()) {
         esp_hid_ble_gap_adv_start();
@@ -404,11 +407,6 @@ static HidKey ascii_to_hid(char c) {
 }
 
 void Esp32BleKeyboard::press(std::string message) {
-  /* EN: Printing arbitrary text still requires an existing connection —
-   * queuing a multi-character stream for advertise-on-demand is out of
-   * scope for now. RU: Печать произвольного текста по-прежнему требует
-   * уже установленного соединения — постановка в очередь многосимвольного
-   * текста для адвертайзинга-по-требованию пока не реализована. */
   if (!g_connected) {
     ESP_LOGW(TAG, "Not connected, cannot print");
     return;
@@ -460,10 +458,6 @@ static bool is_modifier(uint8_t key) {
 }
 
 void Esp32BleKeyboard::press(uint8_t key, bool with_timer) {
-  /* EN: No longer bails out on !g_connected — send_keyboard_report() below
-   * now handles advertise-on-demand + queueing.
-   * RU: Больше не прерывается при !g_connected — send_keyboard_report()
-   * ниже теперь сама обрабатывает адвертайзинг-по-требованию и очередь. */
   if (with_timer) {
     update_timer();
   }
@@ -482,10 +476,6 @@ void Esp32BleKeyboard::press(MediaKeyReport key, bool with_timer) {
 }
 
 void Esp32BleKeyboard::press_combination(const std::vector<std::string> &keys, uint32_t hold_ms) {
-  /* EN: Combinations still require an existing connection (same reasoning
-   * as press(std::string) above).
-   * RU: Комбинации по-прежнему требуют уже установленного соединения
-   * (та же причина, что и у press(std::string) выше). */
   if (!g_connected) {
     ESP_LOGW(TAG, "Not connected, cannot press combination");
     return;
@@ -574,16 +564,9 @@ void Esp32BleKeyboard::stop() {
 
   s_stack_running = false;
 
-  /* EN: A deliberate stop() discards any queued advertise-on-demand action
-   * and cancels its timers — otherwise a stale queued press could fire on
-   * a later, unrelated connection.
-   * RU: Намеренный stop() отбрасывает любую отложенную команду
-   * адвертайзинга-по-требованию и отменяет её таймеры — иначе устаревшая
-   * команда могла бы сработать при следующем, не связанном с ней,
-   * подключении. */
-  cancel_timeout("ble_idle_disconnect");
-  cancel_timeout("ble_pending_timeout");
-  cancel_timeout("ble_pending_flush");
+  App.scheduler.cancel_timeout(this, "ble_idle_disconnect");
+  App.scheduler.cancel_timeout(this, "ble_pending_timeout");
+  App.scheduler.cancel_timeout(this, "ble_pending_flush");
   s_pending_kind = PendingReportKind::NONE;
 
   esp_hid_ble_gap_adv_stop();
