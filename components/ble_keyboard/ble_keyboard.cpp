@@ -69,58 +69,51 @@ static std::atomic<bool> s_stack_running{false};
 static esp_hidd_dev_t *s_hid_dev = NULL;
 static int s_advertising_startup_delay = 0;
 
-/* EN: Pointer to the single Esp32BleKeyboard instance, needed so free
- * functions (like the NimBLE event handler) can schedule timeouts via
- * App.scheduler (the component's own protected set_timeout()/
- * cancel_timeout() cannot be called from outside its member functions)
- * and call the public start()/stop() methods.
- * RU: Указатель на единственный экземпляр Esp32BleKeyboard — нужен, чтобы
- * свободные функции (например, обработчик событий NimBLE) могли планировать
- * таймауты через App.scheduler (собственные protected set_timeout()/
- * cancel_timeout() компонента нельзя вызвать вне его методов) и вызывать
- * публичные start()/stop(). */
 static Esp32BleKeyboard *s_instance = nullptr;
 
 /* ========================================================================
- * ADVERTISE-ON-DEMAND + AUTO-IDLE-DISCONNECT
- * АДВЕРТАЙЗИНГ-ПО-ТРЕБОВАНИЮ + АВТООТКЛЮЧЕНИЕ ПО БЕЗДЕЙСТВИЮ
+ * ADVERTISE-ON-DEMAND + AUTO-IDLE-DISCONNECT + AUTO-RELEASE
+ * АДВЕРТАЙЗИНГ-ПО-ТРЕБОВАНИЮ + АВТООТКЛЮЧЕНИЕ ПО БЕЗДЕЙСТВИЮ + АВТООТПУСКАНИЕ
  *
- * EN: Replaces an external Home Assistant automation/script that used to:
- *   1) call ble_keyboard.start when a media key press was requested,
- *   2) wait for the phone to connect,
- *   3) send the key,
- *   4) call ble_keyboard.stop after ~30s of inactivity.
- * That whole lifecycle is now handled inside the component itself:
- *   - press()/press(MediaKeyReport) auto-start advertising if the stack is
- *     stopped, and queue the single most recent action if the phone isn't
- *     connected yet.
- *   - once ESP_HIDD_CONNECT_EVENT fires, the queued action is flushed after
- *     a short settle delay (the central needs a moment to subscribe to HID
- *     report notifications before the first report is guaranteed delivered).
- *   - every successful report send (re)starts a 30s idle timer; if nothing
- *     else is sent within that window, stop() is called automatically.
- * The old external HA script for auto-disconnect can now be removed.
+ * EN: The auto-release logic below fixes a real bug found in production
+ * logs: when a button press arrives while the phone isn't connected yet
+ * (advertise-on-demand path), the *press* gets queued and sent once
+ * connected, but any external "release" action (e.g. from the YAML
+ * automation's `delay: 100ms` + `ble_keyboard.release`) fires WHILE the
+ * phone is still connecting and is silently dropped (release() bails out
+ * if !g_connected). The press is then never released, which — combined
+ * with HID Consumer Control usages like "Scan Next/Previous Track" (0xB5/
+ * 0xB6) being explicitly a HOLD-to-seek control per the HID spec, and
+ * Volume Increment/Decrement (0xE9/0xEA) being interpreted by many hosts
+ * as "held = keep stepping" — explains the reported symptoms: seeking
+ * instead of skipping tracks, volume racing to max/min, and flaky
+ * play/pause toggling. The fix: the component now ALWAYS sends its own
+ * zero (release) report ~120ms after any press it sends, regardless of
+ * whether that press went out immediately or was flushed from the queue.
+ * External `ble_keyboard.release` calls become redundant but harmless.
  *
- * RU: Заменяет внешнюю автоматизацию/скрипт в Home Assistant, которая
- * раньше: 1) вызывала ble_keyboard.start при запросе медиа-кнопки,
- * 2) ждала подключения телефона, 3) слала команду, 4) вызывала
- * ble_keyboard.stop через ~30с бездействия. Теперь весь этот жизненный
- * цикл реализован внутри самого компонента:
- *   - press()/press(MediaKeyReport) сами включают адвертайзинг, если стек
- *     остановлен, и ставят в очередь одну (последнюю) команду, если телефон
- *     ещё не подключился.
- *   - как только приходит ESP_HIDD_CONNECT_EVENT, отложенная команда
- *     отправляется после небольшой задержки на "устаканивание" (центральное
- *     устройство должно успеть подписаться на нотификации HID-репортов,
- *     иначе первый отчёт может не доставиться).
- *   - каждая успешно отправленная команда (пере)запускает таймер
- *     бездействия на 30с; если за это время новых команд не было,
- *     stop() вызывается автоматически.
- * Старый внешний HA-скрипт для автоотключения теперь можно убрать.
+ * RU: Логика авто-отпускания ниже устраняет реальный баг, найденный по
+ * логам: когда команда нажатия приходит, пока телефон ещё не подключён
+ * (путь adver tise-on-demand), само НАЖАТИЕ ставится в очередь и
+ * отправляется после подключения, а внешнее действие "release" (например,
+ * из YAML-автоматизации через `delay: 100ms` + `ble_keyboard.release`)
+ * срабатывает ПОКА телефон ещё подключается и молча игнорируется
+ * (release() выходит сразу, если !g_connected). В итоге нажатие никогда
+ * не отпускается — а поскольку HID Consumer Control usage-коды вроде
+ * "Scan Next/Previous Track" (0xB5/0xB6) по спецификации HID буквально
+ * означают "перемотка, пока зажато", а Volume Increment/Decrement
+ * (0xE9/0xEA) многими хостами трактуются как "зажато = продолжать
+ * докручивать", это полностью объясняет замеченные симптомы: перемотку
+ * вместо переключения трека, улетающую громкость и нестабильный
+ * play/pause. Решение: теперь компонент ВСЕГДА сам отправляет нулевой
+ * (release) отчёт ~120мс после любого отправленного нажатия — независимо
+ * от того, ушло ли оно сразу или было отложено в очереди. Внешние вызовы
+ * `ble_keyboard.release` становятся избыточными, но безвредными.
  * ======================================================================== */
-static constexpr uint32_t kAutoIdleDisconnectMs = 30000;   // 30s, matches the previous HA script
+static constexpr uint32_t kAutoIdleDisconnectMs = 30000;   // 30s idle timeout
 static constexpr uint32_t kPostConnectSettleMs = 300;      // let the central subscribe to notifications
 static constexpr uint32_t kPendingReportMaxWaitMs = 10000; // give up waiting for a connection after this
+static constexpr uint32_t kAutoReleaseMs = 120;            // press->release gap, matches a natural "tap"
 
 enum class PendingReportKind : uint8_t { NONE = 0, KEYBOARD = 1, MEDIA = 2 };
 static PendingReportKind s_pending_kind = PendingReportKind::NONE;
@@ -140,19 +133,46 @@ static void schedule_idle_disconnect() {
   });
 }
 
+/* EN: Sends a zero-filled report for the given report_id after
+ * kAutoReleaseMs, guaranteeing every press we send is eventually released
+ * by us, regardless of what any external automation does.
+ * RU: Отправляет нулевой отчёт для указанного report_id спустя
+ * kAutoReleaseMs, гарантируя, что любое отправленное нами нажатие рано или
+ * поздно будет отпущено нами же — независимо от того, что делает внешняя
+ * автоматизация. */
+static void schedule_auto_release(uint8_t report_id, size_t len) {
+  if (s_instance == nullptr) {
+    return;
+  }
+  App.scheduler.cancel_timeout(s_instance, "ble_auto_release");
+  App.scheduler.set_timeout(s_instance, "ble_auto_release", kAutoReleaseMs, [report_id, len]() {
+    if (s_hid_dev != nullptr) {
+      uint8_t zero[8] = {0};
+      esp_err_t err = esp_hidd_dev_input_set(s_hid_dev, 0, report_id, zero, len);
+      if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_hidd_dev_input_set (auto-release) failed: %d", err);
+      } else {
+        ESP_LOGD(TAG, "Auto-release sent for report_id=%d", report_id);
+      }
+    }
+    schedule_idle_disconnect();
+  });
+}
+
 static void flush_pending_report() {
   if (s_pending_kind == PendingReportKind::NONE || s_hid_dev == nullptr) {
     return;
   }
   uint8_t report_id = (s_pending_kind == PendingReportKind::KEYBOARD) ? 1 : 2;
-  esp_err_t err = esp_hidd_dev_input_set(s_hid_dev, 0, report_id, s_pending_buf, s_pending_len);
+  size_t len = s_pending_len;
+  esp_err_t err = esp_hidd_dev_input_set(s_hid_dev, 0, report_id, s_pending_buf, len);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "esp_hidd_dev_input_set (flush queued action) failed: %d", err);
   } else {
     ESP_LOGI(TAG, "Sent queued action after connect (report_id=%d)", report_id);
+    schedule_auto_release(report_id, len);
   }
   s_pending_kind = PendingReportKind::NONE;
-  schedule_idle_disconnect();
 }
 
 static void queue_or_start(PendingReportKind kind, const uint8_t *buf, size_t len) {
@@ -213,6 +233,7 @@ static void hidd_event_handler(void *handler_args, esp_event_base_t base, int32_
       ESP_LOGI(TAG, "HID device disconnected; reason=%d", param->disconnect.reason);
       if (s_instance != nullptr) {
         App.scheduler.cancel_timeout(s_instance, "ble_idle_disconnect");
+        App.scheduler.cancel_timeout(s_instance, "ble_auto_release");
       }
       if (g_reconnect && s_stack_running.load()) {
         esp_hid_ble_gap_adv_start();
@@ -321,9 +342,13 @@ void Esp32BleKeyboard::set_battery_level(uint8_t level) {
 void Esp32BleKeyboard::send_keyboard_report(uint8_t modifiers, uint8_t key1, uint8_t key2,
                                              uint8_t key3, uint8_t key4, uint8_t key5, uint8_t key6) {
   uint8_t buffer[8] = { modifiers, 0, key1, key2, key3, key4, key5, key6 };
+  bool is_press = (modifiers != 0) || (key1 != 0) || (key2 != 0) || (key3 != 0) ||
+                  (key4 != 0) || (key5 != 0) || (key6 != 0);
 
   if (!g_connected) {
-    queue_or_start(PendingReportKind::KEYBOARD, buffer, sizeof(buffer));
+    if (is_press) {
+      queue_or_start(PendingReportKind::KEYBOARD, buffer, sizeof(buffer));
+    }
     return;
   }
   if (s_hid_dev == nullptr) {
@@ -332,6 +357,10 @@ void Esp32BleKeyboard::send_keyboard_report(uint8_t modifiers, uint8_t key1, uin
   esp_err_t err = esp_hidd_dev_input_set(s_hid_dev, 0, 1, buffer, sizeof(buffer));
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "esp_hidd_dev_input_set (keyboard) failed: %d", err);
+    return;
+  }
+  if (is_press) {
+    schedule_auto_release(1, sizeof(buffer));
   } else {
     schedule_idle_disconnect();
   }
@@ -339,9 +368,12 @@ void Esp32BleKeyboard::send_keyboard_report(uint8_t modifiers, uint8_t key1, uin
 
 void Esp32BleKeyboard::send_media_report(uint8_t byte0, uint8_t byte1) {
   uint8_t buffer[2] = { byte0, byte1 };
+  bool is_press = (byte0 != 0) || (byte1 != 0);
 
   if (!g_connected) {
-    queue_or_start(PendingReportKind::MEDIA, buffer, sizeof(buffer));
+    if (is_press) {
+      queue_or_start(PendingReportKind::MEDIA, buffer, sizeof(buffer));
+    }
     return;
   }
   if (s_hid_dev == nullptr) {
@@ -350,6 +382,10 @@ void Esp32BleKeyboard::send_media_report(uint8_t byte0, uint8_t byte1) {
   esp_err_t err = esp_hidd_dev_input_set(s_hid_dev, 0, 2, buffer, sizeof(buffer));
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "esp_hidd_dev_input_set (media) failed: %d", err);
+    return;
+  }
+  if (is_press) {
+    schedule_auto_release(2, sizeof(buffer));
   } else {
     schedule_idle_disconnect();
   }
@@ -567,6 +603,7 @@ void Esp32BleKeyboard::stop() {
   App.scheduler.cancel_timeout(this, "ble_idle_disconnect");
   App.scheduler.cancel_timeout(this, "ble_pending_timeout");
   App.scheduler.cancel_timeout(this, "ble_pending_flush");
+  App.scheduler.cancel_timeout(this, "ble_auto_release");
   s_pending_kind = PendingReportKind::NONE;
 
   esp_hid_ble_gap_adv_stop();
