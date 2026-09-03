@@ -8,6 +8,80 @@
  * MAINTENANCE NOTES — READ BEFORE EDITING
  * ЗАМЕТКИ ДЛЯ ПОДДЕРЖКИ — ПРОЧИТАТЬ ПЕРЕД РЕДАКТИРОВАНИЕМ
  * ============================================================================
+ *
+ * EN: This file was ported from Arduino/NimBLE-Arduino to native ESP-IDF
+ * (esp_hid + NimBLE host). Key facts for anyone modifying this file:
+ *
+ * 1. start()/stop() do a "SOFT" stop: they only stop advertising
+ *    (ble_gap_adv_stop) and disconnect the current phone
+ *    (ble_gap_terminate). They NEVER call nimble_port_stop()/
+ *    nimble_port_deinit()/esp_hidd_dev_deinit() after setup(). A full
+ *    stack teardown was tried and reliably crashed with
+ *    "Guru Meditation Error: LoadProhibited" (PC 0x400828ca,
+ *    EXCVADDR 0x1a) on every call, not just under a race condition.
+ *    If you're tempted to "properly" tear down the stack — don't. It
+ *    is not safe to call those functions from outside the NimBLE host
+ *    task in this esp_hid/NimBLE combination.
+ *
+ * 2. "Advertise-on-demand": press()/press(MediaKeyReport) work even
+ *    when the phone isn't connected. They auto-start() the stack and
+ *    queue the single most recent action, which fires ~300ms after
+ *    ESP_HIDD_CONNECT_EVENT (the phone needs time to subscribe to HID
+ *    notifications first).
+ *
+ * 3. Auto-release: every press we send is ALWAYS followed by our own
+ *    zero (release) report ~120ms later, regardless of what any
+ *    external YAML automation does. This is required because HID
+ *    Consumer Control codes like Next/Previous Track (0xB5/0xB6) and
+ *    Volume Up/Down (0xE9/0xEA) are treated by many phones as
+ *    "hold to keep going" — an un-released press causes seeking
+ *    instead of track-skip, and runaway volume changes.
+ *
+ * 4. Auto-idle-disconnect: 30 seconds after the last report sent,
+ *    stop() is called automatically. This replaces any external
+ *    Home Assistant script/automation that used to do the same thing
+ *    — do NOT add such a script back, it will race with this logic.
+ *
+ * RU: Этот файл был портирован с Arduino/NimBLE-Arduino на нативный
+ * ESP-IDF (esp_hid + NimBLE host). Ключевые факты для тех, кто будет
+ * это редактировать:
+ *
+ * 1. start()/stop() делают "МЯГКИЙ" стоп: только останавливают
+ *    адвертайзинг (ble_gap_adv_stop) и разрывают текущее соединение с
+ *    телефоном (ble_gap_terminate). Они НИКОГДА не вызывают
+ *    nimble_port_stop()/nimble_port_deinit()/esp_hidd_dev_deinit()
+ *    после setup(). Полный снос стека был опробован и стабильно
+ *    приводил к крэшу "Guru Meditation Error: LoadProhibited"
+ *    (PC 0x400828ca, EXCVADDR 0x1a) при КАЖДОМ вызове, а не только
+ *    при гонке. Если возникнет соблазн сделать "правильный" полный
+ *    снос — не делайте. В данной связке esp_hid/NimBLE вызывать эти
+ *    функции не из host-задачи NimBLE небезопасно.
+ *
+ * 2. "Адвертайзинг по требованию": press()/press(MediaKeyReport)
+ *    работают, даже если телефон не подключён. Они сами вызывают
+ *    start() и ставят в очередь одну (последнюю) команду, которая
+ *    отправляется через ~300мс после ESP_HIDD_CONNECT_EVENT (телефону
+ *    нужно время подписаться на HID-нотификации).
+ *
+ * 3. Авто-отпускание: за каждым отправленным нажатием ВСЕГДА следует
+ *    наш собственный нулевой (release) отчёт через ~120мс, независимо
+ *    от того, что делает внешняя YAML-автоматизация. Это обязательно,
+ *    так как HID Consumer Control коды вроде Next/Previous Track
+ *    (0xB5/0xB6) и Volume Up/Down (0xE9/0xEA) многими телефонами
+ *    трактуются как "держать = продолжать" — неотпущенное нажатие
+ *    вызывает перемотку вместо переключения трека и улетающую громкость.
+ *
+ * 4. Авто-отключение по бездействию: через 30 секунд после последней
+ *    отправленной команды stop() вызывается автоматически. Это
+ *    заменяет любой внешний скрипт/автоматизацию в Home Assistant,
+ *    которая раньше делала то же самое — НЕ возвращайте такой скрипт,
+ *    он будет конфликтовать с этой логикой.
+ * ============================================================================
+ *
+ * ============================================================================
+ * MAINTENANCE NOTES — READ BEFORE EDITING
+ * ЗАМЕТКИ ДЛЯ ПОДДЕРЖКИ — ПРОЧИТАТЬ ПЕРЕД РЕДАКТИРОВАНИЕМ
+ * ============================================================================
  * EN: This file was extended beyond Espressif's original esp_hid_device
  * example to add a NimBLE (not just Bluedroid) implementation of
  * esp_hid_ble_gap_adv_init()/_adv_start(), plus two new helper functions
