@@ -1,0 +1,18 @@
+This repository is a fork of dmamontov/esphome-blekeyboard.
+See the original repository for its license terms.
+
+The file components/ble_keyboard/esp_hid_gap.c is adapted from
+Espressif's ESP-IDF example code and is licensed separately:
+
+--------------------------------------------------------------------
+SPDX-FileCopyrightText: 2021-2024 Espressif Systems (Shanghai) CO LTD
+SPDX-License-Identifier: Unlicense OR CC0-1.0
+--------------------------------------------------------------------
+
+This is free and unencumbered software released into the public domain.
+Anyone is free to copy, modify, publish, use, compile, sell, or
+distribute this software, either in source code form or as a compiled
+binary, for any purpose, commercial or non-commercial, and by any
+means.
+
+For more information, please refer to <https://unlicense.org> 
