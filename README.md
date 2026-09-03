@@ -1,4 +1,12 @@
 # ESPHome BLE Keyboard
+> **Note:** This fork replaces the Arduino/NimBLE-Arduino backend with a
+> native ESP-IDF (esp_hid + NimBLE host) implementation, fixing
+> compatibility with ESP-IDF 5.x and adding soft start/stop, advertise-
+> on-demand, and auto-idle-disconnect features. See CHANGELOG section
+> below for details. Licensing: see LICENSE file — most of this repo
+> follows the original project's license; `esp_hid_gap.c` is Unlicense/
+> CC0 per Espressif's original code.
+> 
 [![CodeQL](https://img.shields.io/badge/CODEQL-Passing-30C854.svg?style=for-the-badge)](https://github.com/dmamontov/hass-miwifi/actions?query=CodeQL)
 [![Telegram](https://img.shields.io/badge/Telegram-channel-34ABDF.svg?style=for-the-badge)](https://t.me/hass_mamontov_tech)
 
