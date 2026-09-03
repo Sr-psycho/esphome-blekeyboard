@@ -1,0 +1,84 @@
+Template 1 — Simple key (for example, Enter)
+
+  - platform: template
+    name: "Send Enter"
+    id: send_enter
+    icon: mdi:keyboard-return
+    on_press:
+      then:
+        - ble_keyboard.press:
+            id: my_ble_keyboard
+            code: 0x28   # HID keycode for Enter
+
+
+Template 2 — Key combination (for example, Ctrl+Alt+Delete)
+
+  - platform: template
+    name: "Send Ctrl+Alt+Delete"
+    id: send_cad
+    icon: mdi:apple-keyboard-control
+    on_press:
+      then:
+        - ble_keyboard.combination:
+            id: my_ble_keyboard
+            delay: 100ms
+            keys:
+              - 0x01      # Left Ctrl (HID modifier bit)
+              - 0x04      # Left Alt (HID modifier bit)
+              - "0x4C"    # Delete keycode
+
+Template 3 — Printing arbitrary text from Home Assistant
+
+text_sensor:
+  - platform: homeassistant
+    id: text_to_type
+    entity_id: input_text.ble_remote_message   # create this helper in HA
+    internal: true
+
+button:
+  - platform: template
+    name: "Type Message"
+    id: type_message
+    icon: mdi:keyboard-outline
+    on_press:
+      then:
+        - ble_keyboard.print:
+            id: my_ble_keyboard
+            text: !lambda "return id(text_to_type).state;"
+
+Template 4 — Arbitrary media key by code (for example, Mute)
+
+  - platform: template
+    name: "Mute"
+    id: mute_toggle
+    icon: mdi:volume-mute
+    on_press:
+      then:
+        - ble_keyboard.press:
+            id: my_ble_keyboard
+            code: [0xE2, 0x00]   # HID Consumer Control: Mute
+
+
+Template 5 — Presentation control / arrow keys (for example, for a presentation)
+
+  - platform: template
+    name: "Slide Next"
+    id: slide_next
+    icon: mdi:arrow-right-bold
+    on_press:
+      then:
+        - ble_keyboard.press:
+            id: my_ble_keyboard
+            code: 0x4F   # Right Arrow
+
+  - platform: template
+    name: "Slide Previous"
+    id: slide_previous
+    icon: mdi:arrow-left-bold
+    on_press:
+      then:
+        - ble_keyboard.press:
+            id: my_ble_keyboard
+            code: 0x50   # Left Arrow
+
+
