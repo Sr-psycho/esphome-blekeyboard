@@ -185,7 +185,7 @@ static Esp32BleKeyboard *s_instance = nullptr;
  * `ble_keyboard.release` становятся избыточными, но безвредными.
  * ======================================================================== */
 static constexpr uint32_t kAutoIdleDisconnectMs = 30000;   // 30s idle timeout
-static constexpr uint32_t kPostConnectSettleMs = 300;      // let the central subscribe to notifications
+static constexpr uint32_t kPostConnectSettleMs = 600;      // let the central subscribe to notifications
 static constexpr uint32_t kPendingReportMaxWaitMs = 10000; // give up waiting for a connection after this
 static constexpr uint32_t kAutoReleaseMs = 120;            // press->release gap, matches a natural "tap"
 
