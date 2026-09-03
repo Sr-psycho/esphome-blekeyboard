@@ -1,0 +1,157 @@
+# ============================================================================
+# BLE Media Remote for ESP32 — Home Assistant virtual Bluetooth keyboard
+# ============================================================================
+# Copy this file. Change the values below to match your own WiFi network.
+# Then flash this file to an ESP32 board using ESPHome.
+# ============================================================================
+
+substitutions:
+  device_name: "blekeyboard"          # Internal name. Use only letters, numbers, dashes.
+  friendly_name: "BLE Media Remote"   # Name shown inside Home Assistant.
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  board: esp32dev
+  variant: esp32
+  framework:
+    type: esp-idf
+    # These options are required. They turn on Bluetooth Low Energy
+    # with keyboard support. Do not remove or change these lines.
+    sdkconfig_options:
+      CONFIG_BT_ENABLED: "y"
+      CONFIG_BT_BLE_ENABLED: "y"
+      CONFIG_BT_NIMBLE_ENABLED: "y"
+      CONFIG_BT_NIMBLE_HID_SERVICE: "y"
+      CONFIG_BT_HID_DEVICE_ENABLED: "y"
+      CONFIG_BT_NIMBLE_NVS_PERSIST: "y"
+      CONFIG_BT_NIMBLE_SM_SC: "y"
+
+logger:
+
+# Create your own secret key. Go to the ESPHome web page, open your
+# device, and click "Generate Key". Paste that key below.
+api:
+  encryption:
+    key: "REPLACE_WITH_YOUR_OWN_BASE64_KEY="
+
+ota:
+  - platform: esphome
+    password: "REPLACE_WITH_YOUR_OWN_OTA_PASSWORD"
+
+# Type your own WiFi name and password below.
+wifi:
+  ssid: "REPLACE_WITH_YOUR_WIFI_SSID"
+  password: "REPLACE_WITH_YOUR_WIFI_PASSWORD"
+  ap:
+    ssid: "${friendly_name} Fallback Hotspot"
+    password: "REPLACE_WITH_FALLBACK_AP_PASSWORD"
+
+captive_portal:
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/Sr-psycho/esphome-blekeyboard
+      ref: main
+
+ble_keyboard:
+  id: my_ble_keyboard
+  name: "${friendly_name}"
+  manufacturer_id: "ESPHome"
+  battery_level: 100
+  reconnect: true
+  buttons: false
+
+sensor:
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 60s
+
+button:
+  - platform: restart
+    entity_category: "config"
+    name: "Restart"
+    id: board_restart
+
+  - platform: template
+    name: "Start Bluetooth Advertising"
+    id: start_ble_adv
+    icon: "mdi:bluetooth"
+    on_press:
+      then:
+        - ble_keyboard.start: my_ble_keyboard
+
+  - platform: template
+    name: "Stop Bluetooth Advertising"
+    id: stop_ble_adv
+    icon: "mdi:bluetooth-off"
+    on_press:
+      then:
+        - ble_keyboard.stop: my_ble_keyboard
+
+  # The buttons below connect to your phone by themselves. You do not
+  # need to press "Start Bluetooth Advertising" first. Just press one
+  # of these buttons, and the ESP32 will turn on Bluetooth by itself.
+
+  - platform: template
+    name: "Next track"
+    id: next_track
+    icon: mdi:skip-next
+    on_press:
+      then:
+        - ble_keyboard.press:
+            id: my_ble_keyboard
+            code: [0xB5, 0x00]
+
+  - platform: template
+    name: "Previous track"
+    id: previous_track
+    icon: mdi:skip-previous
+    on_press:
+      then:
+        - ble_keyboard.press:
+            id: my_ble_keyboard
+            code: [0xB6, 0x00]
+
+  - platform: template
+    name: "Play Pause"
+    id: play_pause
+    icon: mdi:play-pause
+    on_press:
+      then:
+        - ble_keyboard.press:
+            id: my_ble_keyboard
+            code: [0xCD, 0x00]
+
+  - platform: template
+    name: "Vol up"
+    id: vol_up
+    icon: mdi:volume-plus
+    on_press:
+      then:
+        - ble_keyboard.press:
+            id: my_ble_keyboard
+            code: [0xE9, 0x00]
+
+  - platform: template
+    name: "Vol down"
+    id: vol_down
+    icon: mdi:volume-minus
+    on_press:
+      then:
+        - ble_keyboard.press:
+            id: my_ble_keyboard
+            code: [0xEA, 0x00]
+
+  - platform: template
+    name: "Stop Play"
+    id: play_stop
+    icon: mdi:stop
+    on_press:
+      then:
+        - ble_keyboard.press:
+            id: my_ble_keyboard
+            code: [0xB7, 0x00]
