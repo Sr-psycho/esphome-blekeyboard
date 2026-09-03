@@ -1,0 +1,170 @@
+# ============================================================================
+# BLE Media Remote — ESP32 virtual Bluetooth keyboard for Home Assistant
+# ============================================================================
+# EN: Copy this file, fill in the substitutions below with your own WiFi
+# network and secrets, then flash it to an ESP32 board via ESPHome.
+# RU: Скопируйте этот файл, заполните секцию substitutions своими данными
+# WiFi и паролями, затем прошейте ESP32 через ESPHome.
+# ============================================================================
+
+substitutions:
+  device_name: "blekeyboard"          # EN: internal name / RU: внутреннее имя
+  friendly_name: "BLE Media Remote"   # EN: name shown in HA / RU: имя в HA
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  board: esp32dev
+  variant: esp32
+  framework:
+    type: esp-idf
+    # EN: These sdkconfig options are REQUIRED — they enable the NimBLE
+    # Bluetooth stack with HID service support. Do not remove them.
+    # RU: Эти опции sdkconfig ОБЯЗАТЕЛЬНЫ — они включают BLE-стек NimBLE
+    # с поддержкой HID-сервиса. Не удаляйте их.
+    sdkconfig_options:
+      CONFIG_BT_ENABLED: "y"
+      CONFIG_BT_BLE_ENABLED: "y"
+      CONFIG_BT_NIMBLE_ENABLED: "y"
+      CONFIG_BT_NIMBLE_HID_SERVICE: "y"
+      CONFIG_BT_HID_DEVICE_ENABLED: "y"
+      CONFIG_BT_NIMBLE_NVS_PERSIST: "y"
+      CONFIG_BT_NIMBLE_SM_SC: "y"
+
+logger:
+
+# EN: Generate your own encryption key at https://esphome.io (Settings ->
+# Generate Key), or leave commented out to use HA's auto-generated one.
+# RU: Сгенерируйте свой ключ шифрования на https://esphome.io (в интерфейсе
+# ESPHome есть кнопка "Generate Key"), либо оставьте закомментированным —
+# тогда ключ сгенерирует сам ESPHome при первой сборке.
+api:
+  encryption:
+    key: "REPLACE_WITH_YOUR_OWN_BASE64_KEY="
+
+ota:
+  - platform: esphome
+    password: "REPLACE_WITH_YOUR_OWN_OTA_PASSWORD"
+
+# EN: Fill in your WiFi credentials, or better — use !secret and a
+# secrets.yaml file (recommended, keeps passwords out of this file).
+# RU: Впишите свои данные WiFi, либо (рекомендуется) используйте !secret
+# и отдельный файл secrets.yaml — так пароли не попадут в этот файл.
+wifi:
+  ssid: "REPLACE_WITH_YOUR_WIFI_SSID"
+  password: "REPLACE_WITH_YOUR_WIFI_PASSWORD"
+  ap:
+    ssid: "${friendly_name} Fallback Hotspot"
+    password: "REPLACE_WITH_FALLBACK_AP_PASSWORD"
+
+captive_portal:
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/Sr-psycho/esphome-blekeyboard
+      ref: main
+
+ble_keyboard:
+  id: my_ble_keyboard
+  name: "${friendly_name}"
+  manufacturer_id: "ESPHome"
+  battery_level: 100
+  reconnect: true
+  buttons: false
+
+sensor:
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 60s
+
+button:
+  - platform: restart
+    entity_category: "config"
+    name: "Restart"
+    id: board_restart
+
+  - platform: template
+    name: "Start Bluetooth Advertising"
+    id: start_ble_adv
+    icon: "mdi:bluetooth"
+    on_press:
+      then:
+        - ble_keyboard.start: my_ble_keyboard
+
+  - platform: template
+    name: "Stop Bluetooth Advertising"
+    id: stop_ble_adv
+    icon: "mdi:bluetooth-off"
+    on_press:
+      then:
+        - ble_keyboard.stop: my_ble_keyboard
+
+  # EN: The following buttons auto-connect on demand — you don't need to
+  # press "Start Bluetooth Advertising" first. Just press a media key and
+  # the ESP will wake up the Bluetooth connection automatically.
+  # RU: Следующие кнопки сами подключаются по требованию — не нужно
+  # предварительно нажимать "Start Bluetooth Advertising". Просто нажмите
+  # медиа-кнопку, и ESP сама поднимет Bluetooth-соединение.
+
+  - platform: template
+    name: "Next track"
+    id: next_track
+    icon: mdi:skip-next
+    on_press:
+      then:
+        - ble_keyboard.press:
+            id: my_ble_keyboard
+            code: [0xB5, 0x00]
+
+  - platform: template
+    name: "Previous track"
+    id: previous_track
+    icon: mdi:skip-previous
+    on_press:
+      then:
+        - ble_keyboard.press:
+            id: my_ble_keyboard
+            code: [0xB6, 0x00]
+
+  - platform: template
+    name: "Play Pause"
+    id: play_pause
+    icon: mdi:play-pause
+    on_press:
+      then:
+        - ble_keyboard.press:
+            id: my_ble_keyboard
+            code: [0xCD, 0x00]
+
+  - platform: template
+    name: "Vol up"
+    id: vol_up
+    icon: mdi:volume-plus
+    on_press:
+      then:
+        - ble_keyboard.press:
+            id: my_ble_keyboard
+            code: [0xE9, 0x00]
+
+  - platform: template
+    name: "Vol down"
+    id: vol_down
+    icon: mdi:volume-minus
+    on_press:
+      then:
+        - ble_keyboard.press:
+            id: my_ble_keyboard
+            code: [0xEA, 0x00]
+
+  - platform: template
+    name: "Stop Play"
+    id: play_stop
+    icon: mdi:stop
+    on_press:
+      then:
+        - ble_keyboard.press:
+            id: my_ble_keyboard
+            code: [0xB7, 0x00]
