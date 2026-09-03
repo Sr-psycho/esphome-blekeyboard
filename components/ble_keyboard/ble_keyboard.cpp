@@ -1,3 +1,5 @@
+#ifdef USE_ESP32
+
 /* ============================================================================
  * MAINTENANCE NOTES — READ BEFORE EDITING
  * ЗАМЕТКИ ДЛЯ ПОДДЕРЖКИ — ПРОЧИТАТЬ ПЕРЕД РЕДАКТИРОВАНИЕМ
@@ -19,9 +21,11 @@
  *
  * 2. "Advertise-on-demand": press()/press(MediaKeyReport) work even
  *    when the phone isn't connected. They auto-start() the stack and
- *    queue the single most recent action, which fires ~300ms after
+ *    queue the single most recent action, which fires ~600ms after
  *    ESP_HIDD_CONNECT_EVENT (the phone needs time to subscribe to HID
- *    notifications first).
+ *    notifications first — this delay was raised from 300ms to 600ms
+ *    after field testing showed some media player apps need longer
+ *    before the very first report after connect is reliably delivered).
  *
  * 3. Auto-release: every press we send is ALWAYS followed by our own
  *    zero (release) report ~120ms later, regardless of what any
@@ -54,8 +58,11 @@
  * 2. "Адвертайзинг по требованию": press()/press(MediaKeyReport)
  *    работают, даже если телефон не подключён. Они сами вызывают
  *    start() и ставят в очередь одну (последнюю) команду, которая
- *    отправляется через ~300мс после ESP_HIDD_CONNECT_EVENT (телефону
- *    нужно время подписаться на HID-нотификации).
+ *    отправляется через ~600мс после ESP_HIDD_CONNECT_EVENT (телефону
+ *    нужно время подписаться на HID-нотификации — эта задержка была
+ *    увеличена с 300мс до 600мс после тестирования: некоторым
+ *    приложениям-плеерам требуется больше времени, прежде чем первый
+ *    отчёт после подключения гарантированно доставляется).
  *
  * 3. Авто-отпускание: за каждым отправленным нажатием ВСЕГДА следует
  *    наш собственный нулевой (release) отчёт через ~120мс, независимо
@@ -71,8 +78,7 @@
  *    которая раньше делала то же самое — НЕ возвращайте такой скрипт,
  *    он будет конфликтовать с этой логикой.
  * ============================================================================
- */я
-#ifdef USE_ESP32
+ */
 
 #include "ble_keyboard.h"
 #include "esphome/core/log.h"
@@ -148,44 +154,9 @@ static Esp32BleKeyboard *s_instance = nullptr;
 /* ========================================================================
  * ADVERTISE-ON-DEMAND + AUTO-IDLE-DISCONNECT + AUTO-RELEASE
  * АДВЕРТАЙЗИНГ-ПО-ТРЕБОВАНИЮ + АВТООТКЛЮЧЕНИЕ ПО БЕЗДЕЙСТВИЮ + АВТООТПУСКАНИЕ
- *
- * EN: The auto-release logic below fixes a real bug found in production
- * logs: when a button press arrives while the phone isn't connected yet
- * (advertise-on-demand path), the *press* gets queued and sent once
- * connected, but any external "release" action (e.g. from the YAML
- * automation's `delay: 100ms` + `ble_keyboard.release`) fires WHILE the
- * phone is still connecting and is silently dropped (release() bails out
- * if !g_connected). The press is then never released, which — combined
- * with HID Consumer Control usages like "Scan Next/Previous Track" (0xB5/
- * 0xB6) being explicitly a HOLD-to-seek control per the HID spec, and
- * Volume Increment/Decrement (0xE9/0xEA) being interpreted by many hosts
- * as "held = keep stepping" — explains the reported symptoms: seeking
- * instead of skipping tracks, volume racing to max/min, and flaky
- * play/pause toggling. The fix: the component now ALWAYS sends its own
- * zero (release) report ~120ms after any press it sends, regardless of
- * whether that press went out immediately or was flushed from the queue.
- * External `ble_keyboard.release` calls become redundant but harmless.
- *
- * RU: Логика авто-отпускания ниже устраняет реальный баг, найденный по
- * логам: когда команда нажатия приходит, пока телефон ещё не подключён
- * (путь adver tise-on-demand), само НАЖАТИЕ ставится в очередь и
- * отправляется после подключения, а внешнее действие "release" (например,
- * из YAML-автоматизации через `delay: 100ms` + `ble_keyboard.release`)
- * срабатывает ПОКА телефон ещё подключается и молча игнорируется
- * (release() выходит сразу, если !g_connected). В итоге нажатие никогда
- * не отпускается — а поскольку HID Consumer Control usage-коды вроде
- * "Scan Next/Previous Track" (0xB5/0xB6) по спецификации HID буквально
- * означают "перемотка, пока зажато", а Volume Increment/Decrement
- * (0xE9/0xEA) многими хостами трактуются как "зажато = продолжать
- * докручивать", это полностью объясняет замеченные симптомы: перемотку
- * вместо переключения трека, улетающую громкость и нестабильный
- * play/pause. Решение: теперь компонент ВСЕГДА сам отправляет нулевой
- * (release) отчёт ~120мс после любого отправленного нажатия — независимо
- * от того, ушло ли оно сразу или было отложено в очереди. Внешние вызовы
- * `ble_keyboard.release` становятся избыточными, но безвредными.
  * ======================================================================== */
 static constexpr uint32_t kAutoIdleDisconnectMs = 30000;   // 30s idle timeout
-static constexpr uint32_t kPostConnectSettleMs = 600;      // let the central subscribe to notifications
+static constexpr uint32_t kPostConnectSettleMs = 600;      // let the central subscribe to notifications (bumped from 300ms: some media players/OS combos need more time before the first HID report after connect is reliably delivered)
 static constexpr uint32_t kPendingReportMaxWaitMs = 10000; // give up waiting for a connection after this
 static constexpr uint32_t kAutoReleaseMs = 120;            // press->release gap, matches a natural "tap"
 
@@ -207,13 +178,6 @@ static void schedule_idle_disconnect() {
   });
 }
 
-/* EN: Sends a zero-filled report for the given report_id after
- * kAutoReleaseMs, guaranteeing every press we send is eventually released
- * by us, regardless of what any external automation does.
- * RU: Отправляет нулевой отчёт для указанного report_id спустя
- * kAutoReleaseMs, гарантируя, что любое отправленное нами нажатие рано или
- * поздно будет отпущено нами же — независимо от того, что делает внешняя
- * автоматизация. */
 static void schedule_auto_release(uint8_t report_id, size_t len) {
   if (s_instance == nullptr) {
     return;
