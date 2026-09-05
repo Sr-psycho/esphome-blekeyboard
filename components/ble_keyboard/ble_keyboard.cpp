@@ -2,7 +2,6 @@
 
 /* ============================================================================
  * MAINTENANCE NOTES — READ BEFORE EDITING
- * ЗАМЕТКИ ДЛЯ ПОДДЕРЖКИ — ПРОЧИТАТЬ ПЕРЕД РЕДАКТИРОВАНИЕМ
  * ============================================================================
  *
  * EN: This file was ported from Arduino/NimBLE-Arduino to native ESP-IDF
@@ -15,68 +14,31 @@
  *    stack teardown was tried and reliably crashed with
  *    "Guru Meditation Error: LoadProhibited" (PC 0x400828ca,
  *    EXCVADDR 0x1a) on every call, not just under a race condition.
- *    If you're tempted to "properly" tear down the stack — don't. It
+ *    If you're tempted to "properly" tear down the stack, don't. It
  *    is not safe to call those functions from outside the NimBLE host
  *    task in this esp_hid/NimBLE combination.
  *
- * 2. "Advertise-on-demand": press()/press(MediaKeyReport) work even
+ * 2. Advertise-on-demand: press()/press(MediaKeyReport) work even
  *    when the phone isn't connected. They auto-start() the stack and
- *    queue the single most recent action, which fires ~600ms after
- *    ESP_HIDD_CONNECT_EVENT (the phone needs time to subscribe to HID
- *    notifications first — this delay was raised from 300ms to 600ms
- *    after field testing showed some media player apps need longer
- *    before the very first report after connect is reliably delivered).
+ *    queue the single most recent action, which fires about 600ms
+ *    after ESP_HIDD_CONNECT_EVENT (the phone needs time to subscribe
+ *    to HID notifications first; this delay was raised from 300ms to
+ *    600ms after field testing showed some media player apps need
+ *    longer before the very first report after connect is reliably
+ *    delivered).
  *
  * 3. Auto-release: every press we send is ALWAYS followed by our own
- *    zero (release) report ~120ms later, regardless of what any
+ *    zero (release) report about 120ms later, regardless of what any
  *    external YAML automation does. This is required because HID
  *    Consumer Control codes like Next/Previous Track (0xB5/0xB6) and
  *    Volume Up/Down (0xE9/0xEA) are treated by many phones as
- *    "hold to keep going" — an un-released press causes seeking
- *    instead of track-skip, and runaway volume changes.
+ *    hold-to-keep-going. An unreleased press causes seeking instead
+ *    of track-skip, and runaway volume changes.
  *
  * 4. Auto-idle-disconnect: 30 seconds after the last report sent,
  *    stop() is called automatically. This replaces any external
- *    Home Assistant script/automation that used to do the same thing
- *    — do NOT add such a script back, it will race with this logic.
- *
- * RU: Этот файл был портирован с Arduino/NimBLE-Arduino на нативный
- * ESP-IDF (esp_hid + NimBLE host). Ключевые факты для тех, кто будет
- * это редактировать:
- *
- * 1. start()/stop() делают "МЯГКИЙ" стоп: только останавливают
- *    адвертайзинг (ble_gap_adv_stop) и разрывают текущее соединение с
- *    телефоном (ble_gap_terminate). Они НИКОГДА не вызывают
- *    nimble_port_stop()/nimble_port_deinit()/esp_hidd_dev_deinit()
- *    после setup(). Полный снос стека был опробован и стабильно
- *    приводил к крэшу "Guru Meditation Error: LoadProhibited"
- *    (PC 0x400828ca, EXCVADDR 0x1a) при КАЖДОМ вызове, а не только
- *    при гонке. Если возникнет соблазн сделать "правильный" полный
- *    снос — не делайте. В данной связке esp_hid/NimBLE вызывать эти
- *    функции не из host-задачи NimBLE небезопасно.
- *
- * 2. "Адвертайзинг по требованию": press()/press(MediaKeyReport)
- *    работают, даже если телефон не подключён. Они сами вызывают
- *    start() и ставят в очередь одну (последнюю) команду, которая
- *    отправляется через ~600мс после ESP_HIDD_CONNECT_EVENT (телефону
- *    нужно время подписаться на HID-нотификации — эта задержка была
- *    увеличена с 300мс до 600мс после тестирования: некоторым
- *    приложениям-плеерам требуется больше времени, прежде чем первый
- *    отчёт после подключения гарантированно доставляется).
- *
- * 3. Авто-отпускание: за каждым отправленным нажатием ВСЕГДА следует
- *    наш собственный нулевой (release) отчёт через ~120мс, независимо
- *    от того, что делает внешняя YAML-автоматизация. Это обязательно,
- *    так как HID Consumer Control коды вроде Next/Previous Track
- *    (0xB5/0xB6) и Volume Up/Down (0xE9/0xEA) многими телефонами
- *    трактуются как "держать = продолжать" — неотпущенное нажатие
- *    вызывает перемотку вместо переключения трека и улетающую громкость.
- *
- * 4. Авто-отключение по бездействию: через 30 секунд после последней
- *    отправленной команды stop() вызывается автоматически. Это
- *    заменяет любой внешний скрипт/автоматизацию в Home Assistant,
- *    которая раньше делала то же самое — НЕ возвращайте такой скрипт,
- *    он будет конфликтовать с этой логикой.
+ *    Home Assistant script/automation that used to do the same thing.
+ *    Do not add such a script back, it will race with this logic.
  * ============================================================================
  */
 
@@ -111,9 +73,7 @@ namespace ble_keyboard {
 
 static const char *const TAG = "ble_keyboard";
 
-/* --- HID Report Map --- */
 static const uint8_t kHidReportMap[] = {
-    // Keyboard (Report ID 1)
     0x05, 0x01, 0x09, 0x06, 0xA1, 0x01,
     0x85, 0x01,
     0x05, 0x07, 0x19, 0xE0, 0x29, 0xE7,
@@ -127,7 +87,6 @@ static const uint8_t kHidReportMap[] = {
     0x25, 0xFF, 0x05, 0x07, 0x19, 0x00,
     0x29, 0xFF, 0x81, 0x00,
     0xC0,
-    // Consumer Control (Report ID 2)
     0x05, 0x0C, 0x09, 0x01, 0xA1, 0x01,
     0x85, 0x02,
     0x19, 0x00, 0x2A, 0x3C, 0x02,
@@ -136,7 +95,6 @@ static const uint8_t kHidReportMap[] = {
     0xC0,
 };
 
-/* --- Module state --- */
 static bool g_connected = false;
 static bool g_reconnect = true;
 static uint8_t keyboard_output_report_[1] = {0};
@@ -151,14 +109,10 @@ static int s_advertising_startup_delay = 0;
 
 static Esp32BleKeyboard *s_instance = nullptr;
 
-/* ========================================================================
- * ADVERTISE-ON-DEMAND + AUTO-IDLE-DISCONNECT + AUTO-RELEASE
- * АДВЕРТАЙЗИНГ-ПО-ТРЕБОВАНИЮ + АВТООТКЛЮЧЕНИЕ ПО БЕЗДЕЙСТВИЮ + АВТООТПУСКАНИЕ
- * ======================================================================== */
-static constexpr uint32_t kAutoIdleDisconnectMs = 30000;   // 30s idle timeout
-static constexpr uint32_t kPostConnectSettleMs = 600;      // let the central subscribe to notifications (bumped from 300ms: some media players/OS combos need more time before the first HID report after connect is reliably delivered)
-static constexpr uint32_t kPendingReportMaxWaitMs = 10000; // give up waiting for a connection after this
-static constexpr uint32_t kAutoReleaseMs = 120;            // press->release gap, matches a natural "tap"
+static constexpr uint32_t kAutoIdleDisconnectMs = 30000;
+static constexpr uint32_t kPostConnectSettleMs = 600;
+static constexpr uint32_t kPendingReportMaxWaitMs = 10000;
+static constexpr uint32_t kAutoReleaseMs = 120;
 
 enum class PendingReportKind : uint8_t { NONE = 0, KEYBOARD = 1, MEDIA = 2 };
 static PendingReportKind s_pending_kind = PendingReportKind::NONE;
@@ -603,12 +557,6 @@ void Esp32BleKeyboard::release() {
   send_media_report(0, 0);
 }
 
-/* ========================================================================
- * SOFT START/STOP — disconnect + toggle advertising only.
- * МЯГКИЙ ЗАПУСК/ОСТАНОВ — только разрыв соединения + переключение
- * адвертайзинга. NimBLE-хост НИКОГДА не разрушается после setup().
- * ======================================================================== */
-
 void Esp32BleKeyboard::start() {
   std::lock_guard<std::mutex> lock(s_lifecycle_mtx);
 
@@ -643,31 +591,3 @@ void Esp32BleKeyboard::stop() {
   App.scheduler.cancel_timeout(this, "ble_pending_flush");
   App.scheduler.cancel_timeout(this, "ble_auto_release");
   s_pending_kind = PendingReportKind::NONE;
-
-  esp_hid_ble_gap_adv_stop();
-
-  uint16_t conn_handle = esp_hid_ble_gap_conn_handle();
-  if (conn_handle != 0xffff /* BLE_HS_CONN_HANDLE_NONE */) {
-    int rc = ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-    if (rc != 0) {
-      ESP_LOGW(TAG, "ble_gap_terminate failed: %d (device may still show as connected)", rc);
-    }
-  }
-
-  g_connected = false;
-  ESP_LOGI(TAG, "BLE keyboard stopped; not advertising, any active connection was terminated");
-}
-
-bool Esp32BleKeyboard::is_connected() {
-  return g_connected;
-}
-
-void Esp32BleKeyboard::update_timer() {
-  cancel_timeout(TAG);
-  set_timeout(TAG, release_delay_, [this]() { this->release(); });
-}
-
-}  // namespace ble_keyboard
-}  // namespace esphome
-
-#endif  // USE_ESP32
