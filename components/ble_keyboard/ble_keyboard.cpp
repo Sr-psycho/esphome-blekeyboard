@@ -591,3 +591,31 @@ void Esp32BleKeyboard::stop() {
   App.scheduler.cancel_timeout(this, "ble_pending_flush");
   App.scheduler.cancel_timeout(this, "ble_auto_release");
   s_pending_kind = PendingReportKind::NONE;
+
+  esp_hid_ble_gap_adv_stop();
+
+  uint16_t conn_handle = esp_hid_ble_gap_conn_handle();
+  if (conn_handle != 0xffff) {
+    int rc = ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+    if (rc != 0) {
+      ESP_LOGW(TAG, "ble_gap_terminate failed: %d (device may still show as connected)", rc);
+    }
+  }
+
+  g_connected = false;
+  ESP_LOGI(TAG, "BLE keyboard stopped; not advertising, any active connection was terminated");
+}
+
+bool Esp32BleKeyboard::is_connected() {
+  return g_connected;
+}
+
+void Esp32BleKeyboard::update_timer() {
+  cancel_timeout(TAG);
+  set_timeout(TAG, release_delay_, [this]() { this->release(); });
+}
+
+}  // namespace ble_keyboard
+}  // namespace esphome
+
+#endif  // USE_ESP32
