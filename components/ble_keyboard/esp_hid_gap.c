@@ -914,6 +914,45 @@ esp_err_t esp_hid_ble_gap_adv_start(void)
     struct ble_gap_adv_params adv_params;
     int rc;
 
+    /* EN: The legacy BLE advertising packet has a hard 31-byte limit.
+     * Flags (3B) + TX power (3B) + appearance (4B) + one 16-bit service
+     * UUID (4B) = 14 bytes of fixed overhead, leaving at most
+     * 31 - 14 - 2 (name AD header) = 15 bytes for the device name.
+     * A name longer than that makes ble_gap_adv_set_fields() fail with
+     * rc=4 (BLE_HS_EMSGSIZE) and advertising silently never starts —
+     * the device becomes permanently invisible to phone scans, which
+     * looks like a pairing/discovery problem but is actually just an
+     * oversized advertising packet. We truncate defensively here so a
+     * long ble_keyboard "name:" in YAML degrades gracefully (shorter
+     * visible name) instead of breaking discovery outright.
+     *
+     * RU: У классического BLE-адвертайзинга жёсткий лимит 31 байт.
+     * Флаги (3Б) + мощность передачи (3Б) + appearance (4Б) + один
+     * 16-битный UUID сервиса (4Б) = 14 байт фиксированных накладных
+     * расходов, остаётся максимум 31 - 14 - 2 (заголовок AD для имени)
+     * = 15 байт на имя устройства. Имя длиннее этого приводит к отказу
+     * ble_gap_adv_set_fields() с rc=4 (BLE_HS_EMSGSIZE), и адвертайзинг
+     * молча никогда не запускается — устройство становится навсегда
+     * невидимым при сканировании с телефона, что выглядит как проблема
+     * сопряжения/обнаружения, а на деле — просто слишком большой пакет
+     * адвертайзинга. Обрезаем здесь заранее, чтобы длинное поле "name:"
+     * в YAML деградировало плавно (короче видимое имя), а не ломало
+     * обнаружение вовсе. */
+    static char s_truncated_name[16];
+    size_t full_len = strlen(s_adv_device_name);
+    size_t max_name_len = 15;
+    bool truncated = false;
+
+    if (full_len > max_name_len) {
+        memcpy(s_truncated_name, s_adv_device_name, max_name_len);
+        s_truncated_name[max_name_len] = '\0';
+        truncated = true;
+        ESP_LOGW(TAG, "Device name '%s' (%d bytes) is too long for a legacy "
+                       "BLE advertising packet; truncating to '%s' (%d bytes) "
+                       "so advertising can start",
+                 s_adv_device_name, (int) full_len, s_truncated_name, (int) max_name_len);
+    }
+
     memset(&fields, 0, sizeof(fields));
 
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
@@ -924,9 +963,9 @@ esp_err_t esp_hid_ble_gap_adv_start(void)
     fields.appearance = s_adv_appearance;
     fields.appearance_is_present = 1;
 
-    fields.name = (uint8_t *)s_adv_device_name;
-    fields.name_len = strlen(s_adv_device_name);
-    fields.name_is_complete = 1;
+    fields.name = (uint8_t *)(truncated ? s_truncated_name : s_adv_device_name);
+    fields.name_len = truncated ? max_name_len : full_len;
+    fields.name_is_complete = truncated ? 0 : 1;
 
     fields.uuids16 = uuids16;
     fields.num_uuids16 = 1;
